@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: syncans-web
+    runtime: python
+    plan: starter
+    region: oregon
+    buildCommand: "true"
+    startCommand: python server.py
+    healthCheckPath: /api/health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 10000
+      - key: DATABASE_PATH
+        value: /var/data/syncans.db
+    disk:
+      name: syncans-data
+      mountPath: /var/data
+      sizeGB: 1
