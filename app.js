@@ -1,6 +1,18 @@
 const { useEffect, useState } = React;
 const html = htm.bind(React.createElement);
 
+window.addEventListener("error", (event) => {
+  const root = document.getElementById("root");
+  if (!root) return;
+  root.innerHTML = `<pre style="padding:24px;color:#8b1e00;white-space:pre-wrap;font:14px monospace;">${event.message}</pre>`;
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  const root = document.getElementById("root");
+  if (!root) return;
+  root.innerHTML = `<pre style="padding:24px;color:#8b1e00;white-space:pre-wrap;font:14px monospace;">${String(event.reason)}</pre>`;
+});
+
 const trustItems = [
   {
     title: "Mobile verification",
@@ -26,13 +38,6 @@ const trustItems = [
     title: "Reputation score",
     body: "Reliable participation builds a stronger score, which improves match quality over time.",
   },
-];
-
-const roadmapItems = [
-  "AI smart suggestions for better activity recommendations",
-  "Real-time city activity maps and heat zones",
-  "Corporate team-building and office networking mode",
-  "Premium clans for verified enthusiasts and early access",
 ];
 
 async function apiFetch(path, options = {}) {
@@ -80,26 +85,41 @@ function formatTimestamp(timestamp) {
   });
 }
 
-function formFromActivity(activity, filters) {
+function formFromActivity(activity, filters, profile) {
   return {
     title: activity?.title || "Sunrise trek to Sinhgad",
-    category: filters?.category || activity?.category || "Trek",
+    category: filters?.category || activity?.category || profile?.favoriteCategories?.[0] || "Trek",
     time: activity?.time || "06:00",
-    location: activity?.location || "Pune",
+    location: activity?.location || profile?.homeCity || "Pune",
     skillLevel: activity?.skillLevel || "Intermediate",
     slots: activity?.slots || 5,
     notes: activity?.notes || "",
-    radius: filters?.radiusKm || activity?.radiusKm || 12,
+    radius: filters?.radiusKm || activity?.radiusKm || profile?.defaultRadiusKm || 12,
     verifiedOnly:
-      filters?.verifiedOnly !== undefined ? filters.verifiedOnly : activity?.verifiedOnly ?? true,
+      filters?.verifiedOnly !== undefined
+        ? filters.verifiedOnly
+        : activity?.verifiedOnly ?? profile?.defaultVerifiedOnly ?? true,
     womenOnly:
       filters?.womenOnly !== undefined ? filters.womenOnly : activity?.womenOnly ?? false,
+  };
+}
+
+function profileFromPayload(profile) {
+  return {
+    organizerName: profile?.organizerName || "SYNCANS Organizer",
+    homeCity: profile?.homeCity || "Pune",
+    defaultRadiusKm: profile?.defaultRadiusKm || 12,
+    defaultVerifiedOnly: profile?.defaultVerifiedOnly ?? true,
+    favoriteCategories: profile?.favoriteCategories || ["Trek", "Study"],
+    safetyNote:
+      profile?.safetyNote || "Prefer verified groups, daylight meetups, and small batches.",
   };
 }
 
 function App() {
   const [dashboard, setDashboard] = useState(null);
   const [form, setForm] = useState(null);
+  const [profileForm, setProfileForm] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -115,7 +135,10 @@ function App() {
     const payload = await apiFetch(`/api/dashboard${suffix}`);
     setDashboard(payload);
     if (syncForm || !form) {
-      setForm(formFromActivity(payload.currentActivity, payload.filters));
+      setForm(formFromActivity(payload.currentActivity, payload.filters, payload.profile));
+    }
+    if (syncForm || !profileForm) {
+      setProfileForm(profileFromPayload(payload.profile));
     }
   }
 
@@ -150,9 +173,34 @@ function App() {
         body: JSON.stringify(form),
       });
       setDashboard(payload);
-      setForm(formFromActivity(payload.currentActivity, payload.filters));
+      setForm(formFromActivity(payload.currentActivity, payload.filters, payload.profile));
+      setProfileForm(profileFromPayload(payload.profile));
     } catch (submitError) {
       setError(submitError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleProfileSave(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const payload = await apiFetch("/api/profile", {
+        method: "POST",
+        body: JSON.stringify(profileForm),
+      });
+      setDashboard(payload);
+      setProfileForm(profileFromPayload(payload.profile));
+      setForm((currentForm) => ({
+        ...(currentForm || {}),
+        location: payload.profile.homeCity,
+        radius: payload.profile.defaultRadiusKm,
+        verifiedOnly: payload.profile.defaultVerifiedOnly,
+      }));
+    } catch (profileError) {
+      setError(profileError.message);
     } finally {
       setBusy(false);
     }
@@ -193,7 +241,50 @@ function App() {
     }
   }
 
-  if (!dashboard || !form) {
+  function reuseActivity(activity) {
+    setForm({
+      title: activity.title,
+      category: activity.category,
+      time: activity.time,
+      location: activity.location,
+      skillLevel: activity.skillLevel,
+      slots: activity.slots,
+      notes: activity.notes,
+      radius: activity.radiusKm,
+      verifiedOnly: activity.verifiedOnly,
+      womenOnly: activity.womenOnly,
+    });
+    document.querySelector("#create")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function applySuggestion(suggestion) {
+    setForm((currentForm) => ({
+      ...currentForm,
+      title: suggestion.title,
+      category: suggestion.category,
+      location: suggestion.location,
+      radius: suggestion.radiusKm,
+      slots: suggestion.slots,
+      verifiedOnly: suggestion.verifiedOnly,
+    }));
+    document.querySelector("#create")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function toggleFavorite(category) {
+    const current = new Set(profileForm.favoriteCategories);
+    if (current.has(category)) {
+      current.delete(category);
+    } else {
+      current.add(category);
+    }
+    const next = Array.from(current).slice(0, 4);
+    setProfileForm({
+      ...profileForm,
+      favoriteCategories: next.length ? next : [category],
+    });
+  }
+
+  if (!dashboard || !form || !profileForm) {
     return html`
       <div className="loading-shell">
         <div className="loading-card">
@@ -205,13 +296,13 @@ function App() {
   }
 
   const current = dashboard.currentActivity;
+  const slotsLeft = Math.max((current?.slots || 0) - (current?.approvedCount || 0), 0);
   const previewingFilters =
     current &&
     (form.category !== current.category ||
       Number(form.radius) !== Number(current.radiusKm) ||
       Boolean(form.verifiedOnly) !== Boolean(current.verifiedOnly) ||
       Boolean(form.womenOnly) !== Boolean(current.womenOnly));
-  const slotsLeft = Math.max((current?.slots || 0) - (current?.approvedCount || 0), 0);
 
   return html`
     <div className="page-shell">
@@ -225,7 +316,7 @@ function App() {
             </div>
           </div>
           <div className="topbar-actions">
-            <a className="ghost-button" href="#trust">Safety First</a>
+            <a className="ghost-button" href="#profile">Organizer Defaults</a>
             <a className="primary-button" href="#create">Post An Intent</a>
           </div>
         </nav>
@@ -233,21 +324,21 @@ function App() {
         <section className="hero-grid">
           <div className="hero-copy">
             <p className="eyebrow">Don't cancel plans. Sync with clans.</p>
-            <h2>Find people nearby who want to do the same thing, right now.</h2>
+            <h2>Turn spontaneous plans into real nearby meetups.</h2>
             <p className="hero-text">
-              This full-stack version keeps the concept deck's flow but now runs on a real API
-              and SQLite data model. Activities, requests, and notifications persist across reloads.
+              SYNCANS now saves organizer defaults, keeps activity history, and offers one-tap reuse
+              so frequent plans feel fast instead of repetitive.
             </p>
 
             <div className="hero-actions">
               <a className="primary-button" href="#create">Create Activity</a>
-              <a className="secondary-button" href="#board">See Live Matches</a>
+              <a className="secondary-button" href="#history">Reuse Past Plan</a>
             </div>
 
             <div className="hero-stats">
               <article>
                 <strong>${dashboard.metrics.matchCount}</strong>
-                <span>Nearby matches in preview</span>
+                <span>Nearby matches right now</span>
               </article>
               <article>
                 <strong>${dashboard.metrics.requestCount}</strong>
@@ -262,30 +353,30 @@ function App() {
 
           <aside className="signal-panel">
             <div className="panel-header">
-              <p className="eyebrow">Live city signal</p>
+              <p className="eyebrow">Organizer summary</p>
               <span className="pulse-dot"></span>
             </div>
-            <h3>Current activity snapshot</h3>
+            <h3>${profileForm.organizerName}</h3>
             <div className="signal-list">
               <article>
-                <span className="signal-category trek">${current.category}</span>
+                <span className="signal-category startup">City</span>
                 <div>
-                  <strong>${current.title}</strong>
-                  <p>${current.location} • ${formatTime(current.time)}</p>
+                  <strong>${profileForm.homeCity}</strong>
+                  <p>Primary launch zone for matching and defaults</p>
                 </div>
               </article>
               <article>
-                <span className="signal-category startup">Radius</span>
+                <span className="signal-category trek">Favorites</span>
                 <div>
-                  <strong>${current.radiusKm} km discovery</strong>
-                  <p>${current.verifiedOnly ? "Verified-only" : "Open"} matching is active</p>
+                  <strong>${profileForm.favoriteCategories.join(", ")}</strong>
+                  <p>Used for quick suggestions and reusable activity templates</p>
                 </div>
               </article>
               <article>
-                <span className="signal-category study">Crew</span>
+                <span className="signal-category study">Safety</span>
                 <div>
-                  <strong>${slotsLeft} slots left</strong>
-                  <p>${current.approvedCount} approved so far</p>
+                  <strong>${profileForm.defaultRadiusKm} km default</strong>
+                  <p>${profileForm.safetyNote}</p>
                 </div>
               </article>
             </div>
@@ -306,15 +397,138 @@ function App() {
         ? html`
             <div className="status-banner info-banner">
               <strong>Preview mode.</strong>
-              <span>
-                The match board is showing draft filters from the form. Submit the activity to make
-                them live.
-              </span>
+              <span>The live board is showing your draft filters until you publish the activity.</span>
             </div>
           `
         : null}
 
       <main>
+        <section className="card" id="profile">
+          <div className="section-heading">
+            <p className="eyebrow">Organizer defaults</p>
+            <h3>Save your city, safety rules, and favorite categories.</h3>
+          </div>
+
+          <form className="activity-form" onSubmit=${handleProfileSave}>
+            <div className="form-grid">
+              <label>
+                Organizer name
+                <input
+                  type="text"
+                  value=${profileForm.organizerName}
+                  onChange=${(event) =>
+                    setProfileForm({ ...profileForm, organizerName: event.target.value })}
+                  required
+                />
+              </label>
+              <label>
+                Home city
+                <input
+                  type="text"
+                  value=${profileForm.homeCity}
+                  onChange=${(event) => setProfileForm({ ...profileForm, homeCity: event.target.value })}
+                  required
+                />
+              </label>
+            </div>
+
+            <div className="form-grid">
+              <label>
+                Default radius
+                <input
+                  type="number"
+                  min="5"
+                  max="25"
+                  value=${profileForm.defaultRadiusKm}
+                  onChange=${(event) =>
+                    setProfileForm({
+                      ...profileForm,
+                      defaultRadiusKm: Number(event.target.value),
+                    })}
+                />
+              </label>
+              <label>
+                Safety note
+                <input
+                  type="text"
+                  value=${profileForm.safetyNote}
+                  onChange=${(event) =>
+                    setProfileForm({ ...profileForm, safetyNote: event.target.value })}
+                />
+              </label>
+            </div>
+
+            <label className=${`toggle-card ${profileForm.defaultVerifiedOnly ? "toggle-card-active" : ""}`}>
+              <input
+                type="checkbox"
+                checked=${profileForm.defaultVerifiedOnly}
+                onChange=${(event) =>
+                  setProfileForm({
+                    ...profileForm,
+                    defaultVerifiedOnly: event.target.checked,
+                  })}
+              />
+              <div>
+                <strong>Verified-only by default</strong>
+                <span>Use this as the standard rule for fresh activities.</span>
+              </div>
+            </label>
+
+            <div className="section-heading slim">
+              <p className="eyebrow">Favorite categories</p>
+            </div>
+            <div className="category-chips">
+              ${dashboard.categories.map(
+                (category) => html`
+                  <button
+                    key=${category.name}
+                    className=${`chip ${
+                      profileForm.favoriteCategories.includes(category.name) ? "active" : ""
+                    }`}
+                    type="button"
+                    onClick=${() => toggleFavorite(category.name)}
+                  >
+                    <span>${category.name}</span>
+                    <small>${category.icon}</small>
+                  </button>
+                `,
+              )}
+            </div>
+
+            <button className="primary-button full-width" type="submit" disabled=${busy}>
+              ${busy ? "Saving..." : "Save organizer defaults"}
+            </button>
+          </form>
+        </section>
+
+        <section className="card">
+          <div className="section-heading">
+            <p className="eyebrow">Smart suggestions</p>
+            <h3>Quick-start plans tailored to your niche.</h3>
+          </div>
+          <div className="match-grid">
+            ${dashboard.suggestions.map(
+              (suggestion) => html`
+                <article key=${suggestion.id} className="match-card">
+                  <h4>${suggestion.title}</h4>
+                  <p>${suggestion.location} | ${suggestion.radiusKm} km | ${suggestion.slots} slots</p>
+                  <div className="badge-row">
+                    <span className="pill">${suggestion.category}</span>
+                    <span className="pill">${suggestion.verifiedOnly ? "Verified default" : "Open discovery"}</span>
+                  </div>
+                  <button
+                    className="secondary-button mini-button"
+                    type="button"
+                    onClick=${() => applySuggestion(suggestion)}
+                  >
+                    Use template
+                  </button>
+                </article>
+              `,
+            )}
+          </div>
+        </section>
+
         <section className="category-band">
           <div className="section-heading">
             <p className="eyebrow">Popular activities</p>
@@ -340,7 +554,7 @@ function App() {
         <section className="workspace-grid" id="create">
           <section className="card">
             <div className="section-heading">
-              <p className="eyebrow">Step 1</p>
+              <p className="eyebrow">Create activity</p>
               <h3>Post your intent</h3>
             </div>
 
@@ -445,8 +659,7 @@ function App() {
                     type="checkbox"
                     checked=${form.verifiedOnly}
                     onChange=${(event) =>
-                      setForm({ ...form, verifiedOnly: event.target.checked })
-                    }
+                      setForm({ ...form, verifiedOnly: event.target.checked })}
                   />
                   <div>
                     <strong>Verified users only</strong>
@@ -475,8 +688,8 @@ function App() {
 
           <aside className="card">
             <div className="section-heading">
-              <p className="eyebrow">Step 2</p>
-              <h3>Matching signal board</h3>
+              <p className="eyebrow">Matching signal board</p>
+              <h3>Live activity status</h3>
             </div>
 
             <div className="metric-grid">
@@ -497,7 +710,7 @@ function App() {
             <section className="activity-highlight">
               <p className="eyebrow">Live activity</p>
               <h4>${current.title}</h4>
-              <p>${current.category} • ${current.location} • ${formatTime(current.time)}</p>
+              <p>${current.category} | ${current.location} | ${formatTime(current.time)}</p>
               <div className="badge-row">
                 <span className="pill">${current.skillLevel}</span>
                 <span className="pill">${current.radiusKm} km radius</span>
@@ -525,10 +738,39 @@ function App() {
           </aside>
         </section>
 
+        <section className="card" id="history">
+          <div className="section-heading">
+            <p className="eyebrow">Activity history</p>
+            <h3>Reuse what already works.</h3>
+          </div>
+          <div className="match-grid">
+            ${dashboard.history.map(
+              (activity) => html`
+                <article key=${activity.id} className="match-card">
+                  <h4>${activity.title}</h4>
+                  <p>${activity.location} | ${formatTime(activity.time)} | ${activity.category}</p>
+                  <div className="badge-row">
+                    <span className="pill">${activity.status}</span>
+                    <span className="pill">${activity.radiusKm} km</span>
+                    <span className="pill">${activity.approvedCount} approved</span>
+                  </div>
+                  <button
+                    className="secondary-button mini-button"
+                    type="button"
+                    onClick=${() => reuseActivity(activity)}
+                  >
+                    Reuse this plan
+                  </button>
+                </article>
+              `,
+            )}
+          </div>
+        </section>
+
         <section className="board-grid" id="board">
           <section className="card">
             <div className="section-heading">
-              <p className="eyebrow">Step 3</p>
+              <p className="eyebrow">Approvals</p>
               <h3>Approve the right people</h3>
             </div>
             <div className="request-list">
@@ -574,11 +816,7 @@ function App() {
                       </article>
                     `,
                   )
-                : html`
-                    <div className="empty-state">
-                      All join requests are handled. Your crew is locked in.
-                    </div>
-                  `}
+                : html`<div className="empty-state">All join requests are handled. Your crew is locked in.</div>`}
             </div>
           </section>
 
@@ -604,10 +842,10 @@ function App() {
                             </div>
                           </div>
                         </div>
-                        <p>${person.vibe} • ${person.bio}</p>
+                        <p>${person.vibe} | ${person.bio}</p>
                         <div className="badge-row">
                           <span className="pill">${person.category}</span>
-                          <span className="pill">${person.reputation.toFixed(1)} reputation</span>
+                          <span className="pill">${person.city}</span>
                           <span className="pill">${person.idVerified ? "ID badge" : "Phone verified"}</span>
                         </div>
                         <button
@@ -645,37 +883,6 @@ function App() {
               `,
             )}
           </div>
-        </section>
-
-        <section className="future-grid">
-          <section className="card">
-            <div className="section-heading">
-              <p className="eyebrow">Business model</p>
-              <h3>Free launch first, premium upgrades next.</h3>
-            </div>
-            <div className="timeline">
-              <article>
-                <span>Phase 1</span>
-                <strong>Community growth</strong>
-                <p>Free posting, limited daily notifications, and strong moderation in launch cities.</p>
-              </article>
-              <article>
-                <span>Phase 2</span>
-                <strong>Monetization</strong>
-                <p>Premium visibility boosts, unlimited posting, sponsored events, and brand partnerships.</p>
-              </article>
-            </div>
-          </section>
-
-          <section className="card">
-            <div className="section-heading">
-              <p className="eyebrow">Future scope</p>
-              <h3>Built to reduce loneliness at city scale.</h3>
-            </div>
-            <div className="roadmap">
-              ${roadmapItems.map((item) => html`<article key=${item}>${item}</article>`)}
-            </div>
-          </section>
         </section>
       </main>
     </div>
