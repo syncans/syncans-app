@@ -147,6 +147,15 @@ SEED_ACTIVITY = {
     "status": "active",
 }
 
+SEED_PROFILE = {
+    "organizer_name": "SYNCANS Organizer",
+    "home_city": "Pune",
+    "default_radius_km": 12,
+    "default_verified_only": 1,
+    "favorite_categories": json.dumps(["Trek", "Study", "Startup"]),
+    "safety_note": "Prefer verified groups, daylight meetups, and small batches.",
+}
+
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -232,6 +241,16 @@ def init_db() -> None:
               body TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS profile (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              organizer_name TEXT NOT NULL,
+              home_city TEXT NOT NULL,
+              default_radius_km INTEGER NOT NULL,
+              default_verified_only INTEGER NOT NULL DEFAULT 1,
+              favorite_categories TEXT NOT NULL,
+              safety_note TEXT NOT NULL
+            );
             """
         )
 
@@ -281,6 +300,22 @@ def init_db() -> None:
                 "Controlled messaging and approval-only joins are enabled.",
             )
 
+        profile_count = connection.execute("SELECT COUNT(*) FROM profile").fetchone()[0]
+        if profile_count == 0:
+            connection.execute(
+                """
+                INSERT INTO profile (
+                  id, organizer_name, home_city, default_radius_km,
+                  default_verified_only, favorite_categories, safety_note
+                )
+                VALUES (
+                  1, :organizer_name, :home_city, :default_radius_km,
+                  :default_verified_only, :favorite_categories, :safety_note
+                )
+                """,
+                SEED_PROFILE,
+            )
+
 
 def create_seed_requests(connection: sqlite3.Connection, activity_id: int) -> None:
     connection.executemany(
@@ -310,6 +345,37 @@ def push_notification(connection: sqlite3.Connection, title: str, body: str) -> 
         "INSERT INTO notifications (title, body, created_at) VALUES (?, ?, ?)",
         (title, body, now_iso()),
     )
+
+
+def get_profile(connection: sqlite3.Connection) -> sqlite3.Row:
+    row = connection.execute("SELECT * FROM profile WHERE id = 1").fetchone()
+    if row is None:
+        connection.execute(
+            """
+            INSERT INTO profile (
+              id, organizer_name, home_city, default_radius_km,
+              default_verified_only, favorite_categories, safety_note
+            )
+            VALUES (
+              1, :organizer_name, :home_city, :default_radius_km,
+              :default_verified_only, :favorite_categories, :safety_note
+            )
+            """,
+            SEED_PROFILE,
+        )
+        row = connection.execute("SELECT * FROM profile WHERE id = 1").fetchone()
+    return row
+
+
+def serialize_profile(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "organizerName": row["organizer_name"],
+        "homeCity": row["home_city"],
+        "defaultRadiusKm": row["default_radius_km"],
+        "defaultVerifiedOnly": bool(row["default_verified_only"]),
+        "favoriteCategories": json.loads(row["favorite_categories"]),
+        "safetyNote": row["safety_note"],
+    }
 
 
 def get_current_activity(connection: sqlite3.Connection) -> sqlite3.Row | None:
@@ -346,6 +412,7 @@ def fetch_matching_users(
     radius_km: int,
     verified_only: bool,
     women_only: bool,
+    city: str,
 ) -> list[sqlite3.Row]:
     return connection.execute(
         """
@@ -355,10 +422,49 @@ def fetch_matching_users(
           AND distance_km <= ?
           AND (? = 0 OR phone_verified = 1)
           AND (? = 0 OR gender = 'woman')
-        ORDER BY id_verified DESC, reputation DESC, distance_km ASC, id ASC
+        ORDER BY
+          CASE WHEN lower(city) = lower(?) THEN 0 ELSE 1 END,
+          id_verified DESC,
+          reputation DESC,
+          distance_km ASC,
+          id ASC
         """,
-        (category, radius_km, int(verified_only), int(women_only)),
+        (category, radius_km, int(verified_only), int(women_only), city),
     ).fetchall()
+
+
+def build_suggestions(profile: sqlite3.Row, history: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    favorites = json.loads(profile["favorite_categories"])
+    quick_slots = [4, 5, 6]
+    suggestions = []
+    for index, category in enumerate(favorites[:3]):
+        suggestions.append(
+            {
+                "id": f"{category.lower()}-{index}",
+                "title": f"{category} plan in {profile['home_city']}",
+                "category": category,
+                "location": profile["home_city"],
+                "radiusKm": profile["default_radius_km"],
+                "slots": quick_slots[index % len(quick_slots)],
+                "verifiedOnly": bool(profile["default_verified_only"]),
+            }
+        )
+
+    if history:
+        last = history[0]
+        suggestions.append(
+            {
+                "id": f"repeat-{last['id']}",
+                "title": f"Repeat: {last['title']}",
+                "category": last["category"],
+                "location": last["location"],
+                "radiusKm": last["radius_km"],
+                "slots": last["slots"],
+                "verifiedOnly": bool(last["verified_only"]),
+            }
+        )
+
+    return suggestions[:4]
 
 
 def build_dashboard(
@@ -370,6 +476,7 @@ def build_dashboard(
     women_only: bool | None = None,
 ) -> dict[str, Any]:
     activity = get_current_activity(connection)
+    profile = get_profile(connection)
     if activity is None:
         return {
             "categories": CATEGORIES,
@@ -378,6 +485,9 @@ def build_dashboard(
             "nearbyUsers": [],
             "requestQueue": [],
             "notifications": [],
+            "history": [],
+            "profile": serialize_profile(profile),
+            "suggestions": [],
             "filters": {},
         }
 
@@ -394,6 +504,7 @@ def build_dashboard(
         radius_km=active_radius,
         verified_only=active_verified_only,
         women_only=active_women_only,
+        city=activity["location"],
     )
 
     request_rows = connection.execute(
@@ -425,6 +536,14 @@ def build_dashboard(
 
     notifications = connection.execute(
         "SELECT * FROM notifications ORDER BY created_at DESC, id DESC LIMIT 5"
+    ).fetchall()
+    history_rows = connection.execute(
+        """
+        SELECT *
+        FROM activities
+        ORDER BY created_at DESC, id DESC
+        LIMIT 5
+        """
     ).fetchall()
 
     match_count = len(users)
@@ -487,6 +606,27 @@ def build_dashboard(
             }
             for row in notifications
         ],
+        "history": [
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "category": row["category"],
+                "time": row["start_time"],
+                "location": row["location"],
+                "skillLevel": row["skill_level"],
+                "slots": row["slots"],
+                "radiusKm": row["radius_km"],
+                "notes": row["notes"],
+                "verifiedOnly": bool(row["verified_only"]),
+                "womenOnly": bool(row["women_only"]),
+                "approvedCount": row["approved_count"],
+                "status": row["status"],
+                "createdAt": row["created_at"],
+            }
+            for row in history_rows
+        ],
+        "profile": serialize_profile(profile),
+        "suggestions": build_suggestions(profile, history_rows),
         "filters": {
             "category": active_category,
             "radiusKm": active_radius,
@@ -498,17 +638,19 @@ def build_dashboard(
 
 def create_activity(connection: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
     connection.execute("UPDATE activities SET status = 'closed' WHERE status = 'active'")
+    profile = get_profile(connection)
+    favorite_categories = json.loads(profile["favorite_categories"])
 
     activity = {
         "title": str(payload.get("title", "Untitled activity")).strip()[:70] or "Untitled activity",
-        "category": str(payload.get("category", "Trek")),
+        "category": str(payload.get("category", favorite_categories[0] if favorite_categories else "Trek")),
         "start_time": str(payload.get("time", "06:00")),
-        "location": str(payload.get("location", "Pune")).strip()[:40] or "Pune",
+        "location": str(payload.get("location", profile["home_city"])).strip()[:40] or profile["home_city"],
         "skill_level": str(payload.get("skillLevel", "Beginner friendly")).strip()[:40],
         "slots": max(2, min(int(payload.get("slots", 5)), 10)),
-        "radius_km": max(5, min(int(payload.get("radius", 12)), 25)),
+        "radius_km": max(5, min(int(payload.get("radius", profile["default_radius_km"])), 25)),
         "notes": str(payload.get("notes", "")).strip()[:120],
-        "verified_only": int(to_bool(payload.get("verifiedOnly", True))),
+        "verified_only": int(to_bool(payload.get("verifiedOnly", bool(profile["default_verified_only"])))),
         "women_only": int(to_bool(payload.get("womenOnly", False))),
         "approved_count": 0,
         "status": "active",
@@ -535,6 +677,7 @@ def create_activity(connection: sqlite3.Connection, payload: dict[str, Any]) -> 
         radius_km=activity["radius_km"],
         verified_only=bool(activity["verified_only"]),
         women_only=bool(activity["women_only"]),
+        city=activity["location"],
     )[:3]
 
     seeded_requests = []
@@ -691,6 +834,44 @@ def create_invitation(
     return HTTPStatus.OK, build_dashboard(connection)
 
 
+def update_profile(connection: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    current = get_profile(connection)
+    favorite_categories = payload.get("favoriteCategories")
+    if isinstance(favorite_categories, list):
+        filtered = [str(item) for item in favorite_categories if str(item) in {c["name"] for c in CATEGORIES}]
+        if not filtered:
+            filtered = json.loads(current["favorite_categories"])
+    else:
+        filtered = json.loads(current["favorite_categories"])
+
+    connection.execute(
+        """
+        UPDATE profile
+        SET organizer_name = ?,
+            home_city = ?,
+            default_radius_km = ?,
+            default_verified_only = ?,
+            favorite_categories = ?,
+            safety_note = ?
+        WHERE id = 1
+        """,
+        (
+            str(payload.get("organizerName", current["organizer_name"])).strip()[:60] or current["organizer_name"],
+            str(payload.get("homeCity", current["home_city"])).strip()[:40] or current["home_city"],
+            max(5, min(int(payload.get("defaultRadiusKm", current["default_radius_km"])), 25)),
+            int(to_bool(payload.get("defaultVerifiedOnly", bool(current["default_verified_only"])))),
+            json.dumps(filtered),
+            str(payload.get("safetyNote", current["safety_note"])).strip()[:160] or current["safety_note"],
+        ),
+    )
+    push_notification(
+        connection,
+        "Profile updated",
+        "Your organizer defaults were saved for the next activity.",
+    )
+    return build_dashboard(connection)
+
+
 class SyncansHandler(BaseHTTPRequestHandler):
     server_version = "SYNCANS/1.0"
 
@@ -734,6 +915,12 @@ class SyncansHandler(BaseHTTPRequestHandler):
             json_response(self, HTTPStatus.OK, payload)
             return
 
+        if parsed.path == "/api/profile":
+            with get_connection() as connection:
+                payload = {"profile": serialize_profile(get_profile(connection))}
+            json_response(self, HTTPStatus.OK, payload)
+            return
+
         json_response(self, HTTPStatus.NOT_FOUND, {"error": "Unknown endpoint."})
 
     def handle_api_post(self, parsed) -> None:
@@ -758,6 +945,11 @@ class SyncansHandler(BaseHTTPRequestHandler):
                     activity_id=payload.get("activityId"),
                 )
                 json_response(self, status, response)
+                return
+
+            if parsed.path == "/api/profile":
+                response = update_profile(connection, payload)
+                json_response(self, HTTPStatus.OK, response)
                 return
 
             if parsed.path.startswith("/api/requests/") and parsed.path.endswith("/decision"):
