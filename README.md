@@ -1,27 +1,29 @@
 # SYNCANS
 
-Full-stack SYNCANS prototype with:
+SYNCANS is a real-time, interest-based activity matching app for spontaneous plans.
 
-- React frontend served locally from this workspace
-- Python API using the standard library
-- SQLite persistence for users, activities, join requests, and notifications
+## What this repo contains
 
-## Run
+- `server.py`: Python backend and static file server
+- `index.html`, `app.js`, `styles.css`: hosted frontend
+- `render.yaml`: Render deployment blueprint
+- `Dockerfile`: alternative container deployment path
+- `vendor/`: browser builds for React, React DOM, and HTM
 
-Start the app with [start-server.ps1](D:/SYNCANS/start-server.ps1).
+## Core features
 
-If you want to launch it manually, run:
+- Post real-time activities by category, city, time, radius, and safety settings
+- Match nearby users with city-aware ordering and verification filters
+- Approve or decline join requests
+- Invite users directly into an activity
+- Save organizer defaults such as home city, radius, and favorite categories
+- Reuse activity history and quick templates
+- Store data in SQLite with a persistent disk on Render
+
+## Local run
 
 ```powershell
 C:\Users\adars\AppData\Local\Programs\Python\Python314\python.exe D:\SYNCANS\server.py
 ```
 
-Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
-
-## Main files
-
-- [server.py](D:/SYNCANS/server.py)
-- [index.html](D:/SYNCANS/index.html)
-- [app.js](D:/SYNCANS/app.js)
-- [styles.css](D:/SYNCANS/styles.css)
-- [syncans.db](D:/SYNCANS/syncans.db) after first run
+Then open `http://127.0.0.1:8000`.
