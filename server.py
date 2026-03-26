@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import os
+import secrets
 import sqlite3
 from datetime import datetime
 from http import HTTPStatus
@@ -15,160 +17,21 @@ ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("DATABASE_PATH", str(ROOT / "syncans.db")))
 
 CATEGORIES = [
-    {"name": "Trek", "icon": "Altitude"},
-    {"name": "Gym", "icon": "Strength"},
-    {"name": "Study", "icon": "Focus"},
-    {"name": "Startup", "icon": "Build"},
-    {"name": "Cafe", "icon": "Brew"},
-    {"name": "Sports", "icon": "Play"},
-    {"name": "Culture", "icon": "Explore"},
-    {"name": "Music", "icon": "Jam"},
+    "Trek",
+    "Gym",
+    "Study",
+    "Startup",
+    "Cafe",
+    "Sports",
+    "Culture",
+    "Music",
 ]
 
-SEED_USERS = [
-    {
-        "name": "Riya S.",
-        "gender": "woman",
-        "category": "Trek",
-        "distance_km": 7,
-        "vibe": "Weekend hiker",
-        "reputation": 4.9,
-        "phone_verified": 1,
-        "id_verified": 1,
-        "availability": "Free now",
-        "bio": "Early riser, carries first-aid and knows the route.",
-        "city": "Pune",
-    },
-    {
-        "name": "Arjun K.",
-        "gender": "man",
-        "category": "Startup",
-        "distance_km": 5,
-        "vibe": "Product builder",
-        "reputation": 4.8,
-        "phone_verified": 1,
-        "id_verified": 1,
-        "availability": "Next 45 mins",
-        "bio": "Interested in quick founder coffee and GTM brainstorming.",
-        "city": "Mumbai",
-    },
-    {
-        "name": "Megha P.",
-        "gender": "woman",
-        "category": "Study",
-        "distance_km": 4,
-        "vibe": "Deep work partner",
-        "reputation": 4.7,
-        "phone_verified": 1,
-        "id_verified": 0,
-        "availability": "Until 9 PM",
-        "bio": "Pomodoro fan, prefers library sessions and quiet cafes.",
-        "city": "Pune",
-    },
-    {
-        "name": "Kabir J.",
-        "gender": "man",
-        "category": "Gym",
-        "distance_km": 8,
-        "vibe": "Consistency buddy",
-        "reputation": 4.6,
-        "phone_verified": 1,
-        "id_verified": 0,
-        "availability": "Starts in 20 mins",
-        "bio": "Push-pull-legs regular, good for accountability sessions.",
-        "city": "Pune",
-    },
-    {
-        "name": "Sana M.",
-        "gender": "woman",
-        "category": "Trek",
-        "distance_km": 11,
-        "vibe": "Trail regular",
-        "reputation": 4.95,
-        "phone_verified": 1,
-        "id_verified": 1,
-        "availability": "Ready by 5:30 AM",
-        "bio": "Prefers verified groups and small batches for sunrise climbs.",
-        "city": "Pune",
-    },
-    {
-        "name": "Vikram N.",
-        "gender": "man",
-        "category": "Sports",
-        "distance_km": 13,
-        "vibe": "Pickup organizer",
-        "reputation": 4.5,
-        "phone_verified": 1,
-        "id_verified": 0,
-        "availability": "After work",
-        "bio": "Usually pulls together football and badminton groups quickly.",
-        "city": "Bangalore",
-    },
-    {
-        "name": "Aisha T.",
-        "gender": "woman",
-        "category": "Cafe",
-        "distance_km": 6,
-        "vibe": "City explorer",
-        "reputation": 4.8,
-        "phone_verified": 1,
-        "id_verified": 1,
-        "availability": "Free now",
-        "bio": "Always down for a quick coffee run and conversation.",
-        "city": "Mumbai",
-    },
-    {
-        "name": "Neil D.",
-        "gender": "man",
-        "category": "Culture",
-        "distance_km": 9,
-        "vibe": "Event scout",
-        "reputation": 4.4,
-        "phone_verified": 0,
-        "id_verified": 0,
-        "availability": "Tonight",
-        "bio": "Likes exhibitions, community events, and local performances.",
-        "city": "Pune",
-    },
-]
-
-SEED_ACTIVITY = {
-    "title": "Sunrise trek to Sinhgad",
-    "category": "Trek",
-    "start_time": "06:00",
-    "location": "Pune",
-    "skill_level": "Intermediate",
-    "slots": 5,
-    "radius_km": 12,
-    "notes": "Carry water, torch, and light jacket",
-    "verified_only": 1,
-    "women_only": 0,
-    "approved_count": 2,
-    "status": "active",
-}
-
-SEED_PROFILE = {
-    "organizer_name": "SYNCANS Organizer",
-    "home_city": "Pune",
-    "default_radius_km": 12,
-    "default_verified_only": 1,
-    "favorite_categories": json.dumps(["Trek", "Study", "Startup"]),
-    "safety_note": "Prefer verified groups, daylight meetups, and small batches.",
-}
+SESSION_TTL_DAYS = 30
 
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
-
-
-def to_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return False
 
 
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -180,6 +43,17 @@ def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[st
     handler.wfile.write(body)
 
 
+def error_response(handler: BaseHTTPRequestHandler, status: int, message: str) -> None:
+    json_response(handler, status, {"error": message})
+
+
+def to_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
@@ -188,692 +62,588 @@ def get_connection() -> sqlite3.Connection:
     return connection
 
 
+def table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    row = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def column_exists(connection: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    if not table_exists(connection, table_name):
+        return False
+    rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(row["name"] == column_name for row in rows)
+
+
+def reset_legacy_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        DROP TABLE IF EXISTS activity_members;
+        DROP TABLE IF EXISTS sessions;
+        DROP TABLE IF EXISTS notifications;
+        DROP TABLE IF EXISTS join_requests;
+        DROP TABLE IF EXISTS profile;
+        DROP TABLE IF EXISTS activities;
+        DROP TABLE IF EXISTS users;
+        """
+    )
+
+
 def init_db() -> None:
     with get_connection() as connection:
-        connection.execute("PRAGMA journal_mode = WAL")
+        if table_exists(connection, "users") and not column_exists(connection, "users", "email"):
+            reset_legacy_schema(connection)
+
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               name TEXT NOT NULL,
-              gender TEXT NOT NULL,
-              category TEXT NOT NULL,
-              distance_km REAL NOT NULL,
-              vibe TEXT NOT NULL,
-              reputation REAL NOT NULL,
-              phone_verified INTEGER NOT NULL DEFAULT 1,
+              email TEXT NOT NULL UNIQUE,
+              password_hash TEXT NOT NULL,
+              city TEXT NOT NULL,
+              bio TEXT NOT NULL DEFAULT '',
+              phone_verified INTEGER NOT NULL DEFAULT 0,
               id_verified INTEGER NOT NULL DEFAULT 0,
-              availability TEXT NOT NULL,
-              bio TEXT NOT NULL,
-              city TEXT NOT NULL
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              token TEXT NOT NULL UNIQUE,
+              created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS activities (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
+              owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
               title TEXT NOT NULL,
               category TEXT NOT NULL,
-              start_time TEXT NOT NULL,
               location TEXT NOT NULL,
-              skill_level TEXT NOT NULL,
+              city TEXT NOT NULL,
+              start_time TEXT NOT NULL,
               slots INTEGER NOT NULL,
-              radius_km INTEGER NOT NULL,
-              notes TEXT NOT NULL,
-              verified_only INTEGER NOT NULL DEFAULT 1,
-              women_only INTEGER NOT NULL DEFAULT 0,
-              approved_count INTEGER NOT NULL DEFAULT 0,
-              status TEXT NOT NULL,
+              notes TEXT NOT NULL DEFAULT '',
+              radius_km INTEGER NOT NULL DEFAULT 10,
+              status TEXT NOT NULL DEFAULT 'active',
               created_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS join_requests (
+            CREATE TABLE IF NOT EXISTS activity_members (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
               user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-              message TEXT NOT NULL,
               status TEXT NOT NULL,
-              source TEXT NOT NULL,
-              created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS notifications (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              title TEXT NOT NULL,
-              body TEXT NOT NULL,
-              created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS profile (
-              id INTEGER PRIMARY KEY CHECK (id = 1),
-              organizer_name TEXT NOT NULL,
-              home_city TEXT NOT NULL,
-              default_radius_km INTEGER NOT NULL,
-              default_verified_only INTEGER NOT NULL DEFAULT 1,
-              favorite_categories TEXT NOT NULL,
-              safety_note TEXT NOT NULL
+              created_at TEXT NOT NULL,
+              UNIQUE(activity_id, user_id)
             );
             """
         )
 
-        user_count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        if user_count == 0:
-            connection.executemany(
-                """
-                INSERT INTO users (
-                  name, gender, category, distance_km, vibe, reputation,
-                  phone_verified, id_verified, availability, bio, city
-                )
-                VALUES (
-                  :name, :gender, :category, :distance_km, :vibe, :reputation,
-                  :phone_verified, :id_verified, :availability, :bio, :city
-                )
-                """,
-                SEED_USERS,
-            )
 
-        activity_count = connection.execute("SELECT COUNT(*) FROM activities").fetchone()[0]
-        if activity_count == 0:
-            activity_id = connection.execute(
-                """
-                INSERT INTO activities (
-                  title, category, start_time, location, skill_level, slots,
-                  radius_km, notes, verified_only, women_only, approved_count,
-                  status, created_at
-                )
-                VALUES (
-                  :title, :category, :start_time, :location, :skill_level, :slots,
-                  :radius_km, :notes, :verified_only, :women_only, :approved_count,
-                  :status, :created_at
-                )
-                """,
-                {**SEED_ACTIVITY, "created_at": now_iso()},
-            ).lastrowid
-
-            create_seed_requests(connection, activity_id)
-            push_notification(
-                connection,
-                "Verified cluster found",
-                "3 trekkers within 12 km match your preferred skill level.",
-            )
-            push_notification(
-                connection,
-                "Safety mode active",
-                "Controlled messaging and approval-only joins are enabled.",
-            )
-
-        profile_count = connection.execute("SELECT COUNT(*) FROM profile").fetchone()[0]
-        if profile_count == 0:
-            connection.execute(
-                """
-                INSERT INTO profile (
-                  id, organizer_name, home_city, default_radius_km,
-                  default_verified_only, favorite_categories, safety_note
-                )
-                VALUES (
-                  1, :organizer_name, :home_city, :default_radius_km,
-                  :default_verified_only, :favorite_categories, :safety_note
-                )
-                """,
-                SEED_PROFILE,
-            )
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 150000)
+    return f"{salt}${digest.hex()}"
 
 
-def create_seed_requests(connection: sqlite3.Connection, activity_id: int) -> None:
-    connection.executemany(
-        """
-        INSERT INTO join_requests (activity_id, user_id, message, status, source, created_at)
-        VALUES (?, ?, ?, 'pending', 'matched', ?)
-        """,
-        [
-            (
-                activity_id,
-                1,
-                "I have done this trail twice and can bring a spare torch.",
-                now_iso(),
-            ),
-            (
-                activity_id,
-                5,
-                "Happy to join if the group stays small and verified.",
-                now_iso(),
-            ),
-        ],
-    )
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        salt, expected = stored.split("$", 1)
+    except ValueError:
+        return False
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 150000)
+    return secrets.compare_digest(digest.hex(), expected)
 
 
-def push_notification(connection: sqlite3.Connection, title: str, body: str) -> None:
+def create_session(connection: sqlite3.Connection, user_id: int) -> str:
+    token = secrets.token_urlsafe(32)
     connection.execute(
-        "INSERT INTO notifications (title, body, created_at) VALUES (?, ?, ?)",
-        (title, body, now_iso()),
+        "INSERT INTO sessions (user_id, token, created_at) VALUES (?, ?, ?)",
+        (user_id, token, now_iso()),
     )
+    return token
 
 
-def get_profile(connection: sqlite3.Connection) -> sqlite3.Row:
-    row = connection.execute("SELECT * FROM profile WHERE id = 1").fetchone()
-    if row is None:
-        connection.execute(
-            """
-            INSERT INTO profile (
-              id, organizer_name, home_city, default_radius_km,
-              default_verified_only, favorite_categories, safety_note
-            )
-            VALUES (
-              1, :organizer_name, :home_city, :default_radius_km,
-              :default_verified_only, :favorite_categories, :safety_note
-            )
-            """,
-            SEED_PROFILE,
-        )
-        row = connection.execute("SELECT * FROM profile WHERE id = 1").fetchone()
-    return row
+def get_token_from_headers(handler: BaseHTTPRequestHandler) -> str | None:
+    header = handler.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        return None
+    token = header.removeprefix("Bearer ").strip()
+    return token or None
 
 
-def serialize_profile(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "organizerName": row["organizer_name"],
-        "homeCity": row["home_city"],
-        "defaultRadiusKm": row["default_radius_km"],
-        "defaultVerifiedOnly": bool(row["default_verified_only"]),
-        "favoriteCategories": json.loads(row["favorite_categories"]),
-        "safetyNote": row["safety_note"],
-    }
-
-
-def get_current_activity(connection: sqlite3.Connection) -> sqlite3.Row | None:
+def get_current_user(connection: sqlite3.Connection, handler: BaseHTTPRequestHandler) -> sqlite3.Row | None:
+    token = get_token_from_headers(handler)
+    if not token:
+        return None
     return connection.execute(
-        "SELECT * FROM activities ORDER BY created_at DESC, id DESC LIMIT 1"
+        """
+        SELECT u.*
+        FROM sessions s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.token = ?
+        """,
+        (token,),
     ).fetchone()
 
 
-def serialize_activity(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    if row is None:
-        return None
+def require_user(connection: sqlite3.Connection, handler: BaseHTTPRequestHandler) -> sqlite3.Row | None:
+    user = get_current_user(connection, handler)
+    if user is None:
+        error_response(handler, HTTPStatus.UNAUTHORIZED, "Authentication required.")
+    return user
+
+
+def calculate_trust_score(connection: sqlite3.Connection, user_id: int) -> float:
+    hosted = connection.execute(
+        "SELECT COUNT(*) FROM activities WHERE owner_id = ?",
+        (user_id,),
+    ).fetchone()[0]
+    approved = connection.execute(
+        "SELECT COUNT(*) FROM activity_members WHERE user_id = ? AND status = 'approved'",
+        (user_id,),
+    ).fetchone()[0]
+    incoming = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM activity_members am
+        JOIN activities a ON a.id = am.activity_id
+        WHERE a.owner_id = ? AND am.status = 'approved'
+        """,
+        (user_id,),
+    ).fetchone()[0]
+    raw = 3.8 + (hosted * 0.12) + (approved * 0.08) + (incoming * 0.04)
+    return round(min(raw, 5.0), 1)
+
+
+def activity_approved_count(connection: sqlite3.Connection, activity_id: int) -> int:
+    return connection.execute(
+        "SELECT COUNT(*) FROM activity_members WHERE activity_id = ? AND status = 'approved'",
+        (activity_id,),
+    ).fetchone()[0]
+
+
+def relation_status(connection: sqlite3.Connection, activity_id: int, user_id: int) -> str | None:
+    row = connection.execute(
+        "SELECT status FROM activity_members WHERE activity_id = ? AND user_id = ?",
+        (activity_id, user_id),
+    ).fetchone()
+    return row["status"] if row else None
+
+
+def serialize_activity(connection: sqlite3.Connection, row: sqlite3.Row, viewer_id: int | None = None) -> dict[str, Any]:
+    approved_count = activity_approved_count(connection, row["id"])
+    owner_score = calculate_trust_score(connection, row["owner_id"])
     return {
         "id": row["id"],
         "title": row["title"],
         "category": row["category"],
-        "time": row["start_time"],
         "location": row["location"],
-        "skillLevel": row["skill_level"],
+        "city": row["city"],
+        "time": row["start_time"],
         "slots": row["slots"],
-        "radiusKm": row["radius_km"],
+        "availableSlots": max(row["slots"] - approved_count, 0),
         "notes": row["notes"],
-        "verifiedOnly": bool(row["verified_only"]),
-        "womenOnly": bool(row["women_only"]),
-        "approvedCount": row["approved_count"],
+        "radiusKm": row["radius_km"],
         "status": row["status"],
         "createdAt": row["created_at"],
+        "owner": {
+            "id": row["owner_id"],
+            "name": row["owner_name"],
+            "city": row["owner_city"],
+            "trustScore": owner_score,
+        },
+        "relationStatus": relation_status(connection, row["id"], viewer_id) if viewer_id else None,
+        "mine": bool(viewer_id and viewer_id == row["owner_id"]),
+        "approvedCount": approved_count,
     }
 
 
-def fetch_matching_users(
+def serialize_user(connection: sqlite3.Connection, user: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": user["id"],
+        "name": user["name"],
+        "email": user["email"],
+        "city": user["city"],
+        "bio": user["bio"],
+        "phoneVerified": bool(user["phone_verified"]),
+        "idVerified": bool(user["id_verified"]),
+        "trustScore": calculate_trust_score(connection, user["id"]),
+    }
+
+
+def query_activities(
     connection: sqlite3.Connection,
     *,
-    category: str,
-    radius_km: int,
-    verified_only: bool,
-    women_only: bool,
-    city: str,
-) -> list[sqlite3.Row]:
-    return connection.execute(
-        """
-        SELECT *
-        FROM users
-        WHERE category = ?
-          AND distance_km <= ?
-          AND (? = 0 OR phone_verified = 1)
-          AND (? = 0 OR gender = 'woman')
-        ORDER BY
-          CASE WHEN lower(city) = lower(?) THEN 0 ELSE 1 END,
-          id_verified DESC,
-          reputation DESC,
-          distance_km ASC,
-          id ASC
-        """,
-        (category, radius_km, int(verified_only), int(women_only), city),
-    ).fetchall()
-
-
-def build_suggestions(profile: sqlite3.Row, history: list[sqlite3.Row]) -> list[dict[str, Any]]:
-    favorites = json.loads(profile["favorite_categories"])
-    quick_slots = [4, 5, 6]
-    suggestions = []
-    for index, category in enumerate(favorites[:3]):
-        suggestions.append(
-            {
-                "id": f"{category.lower()}-{index}",
-                "title": f"{category} plan in {profile['home_city']}",
-                "category": category,
-                "location": profile["home_city"],
-                "radiusKm": profile["default_radius_km"],
-                "slots": quick_slots[index % len(quick_slots)],
-                "verifiedOnly": bool(profile["default_verified_only"]),
-            }
-        )
-
-    if history:
-        last = history[0]
-        suggestions.append(
-            {
-                "id": f"repeat-{last['id']}",
-                "title": f"Repeat: {last['title']}",
-                "category": last["category"],
-                "location": last["location"],
-                "radiusKm": last["radius_km"],
-                "slots": last["slots"],
-                "verifiedOnly": bool(last["verified_only"]),
-            }
-        )
-
-    return suggestions[:4]
-
-
-def build_dashboard(
-    connection: sqlite3.Connection,
-    *,
+    user_id: int,
     category: str | None = None,
     radius_km: int | None = None,
-    verified_only: bool | None = None,
-    women_only: bool | None = None,
-) -> dict[str, Any]:
-    activity = get_current_activity(connection)
-    profile = get_profile(connection)
-    if activity is None:
-        return {
-            "categories": CATEGORIES,
-            "currentActivity": None,
-            "metrics": {"matchCount": 0, "requestCount": 0, "trustScore": 4.8},
-            "nearbyUsers": [],
-            "requestQueue": [],
-            "notifications": [],
-            "history": [],
-            "profile": serialize_profile(profile),
-            "suggestions": [],
-            "filters": {},
-        }
+    city: str | None = None,
+    include_mine: bool = True,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    clauses = ["a.status = 'active'"]
+    params: list[Any] = []
 
-    active_category = category or activity["category"]
-    active_radius = radius_km if radius_km is not None else activity["radius_km"]
-    active_verified_only = (
-        verified_only if verified_only is not None else bool(activity["verified_only"])
-    )
-    active_women_only = women_only if women_only is not None else bool(activity["women_only"])
+    if category:
+        clauses.append("a.category = ?")
+        params.append(category)
+    if city:
+        clauses.append("lower(a.city) = lower(?)")
+        params.append(city)
+    if radius_km is not None:
+        clauses.append("a.radius_km <= ?")
+        params.append(radius_km)
+    if not include_mine:
+        clauses.append("a.owner_id != ?")
+        params.append(user_id)
 
-    users = fetch_matching_users(
+    sql = f"""
+        SELECT a.*, u.name AS owner_name, u.city AS owner_city
+        FROM activities a
+        JOIN users u ON u.id = a.owner_id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY a.created_at DESC, a.id DESC
+    """
+    if limit is not None:
+        sql += f" LIMIT {limit}"
+
+    rows = connection.execute(sql, params).fetchall()
+    return [serialize_activity(connection, row, user_id) for row in rows]
+
+
+def build_home(connection: sqlite3.Connection, user: sqlite3.Row) -> dict[str, Any]:
+    active_row = connection.execute(
+        """
+        SELECT a.*, u.name AS owner_name, u.city AS owner_city
+        FROM activities a
+        JOIN users u ON u.id = a.owner_id
+        WHERE a.status = 'active' AND (
+          a.owner_id = ? OR EXISTS (
+            SELECT 1 FROM activity_members am
+            WHERE am.activity_id = a.id AND am.user_id = ? AND am.status = 'approved'
+          )
+        )
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT 1
+        """,
+        (user["id"], user["id"]),
+    ).fetchone()
+
+    nearby = query_activities(
         connection,
-        category=active_category,
-        radius_km=active_radius,
-        verified_only=active_verified_only,
-        women_only=active_women_only,
-        city=activity["location"],
+        user_id=user["id"],
+        city=user["city"],
+        include_mine=False,
+        limit=4,
     )
 
+    pending_requests = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM activity_members am
+        JOIN activities a ON a.id = am.activity_id
+        WHERE a.owner_id = ? AND am.status = 'requested'
+        """,
+        (user["id"],),
+    ).fetchone()[0]
+    joined = connection.execute(
+        "SELECT COUNT(*) FROM activity_members WHERE user_id = ? AND status = 'approved'",
+        (user["id"],),
+    ).fetchone()[0]
+    active_hosted = connection.execute(
+        "SELECT COUNT(*) FROM activities WHERE owner_id = ? AND status = 'active'",
+        (user["id"],),
+    ).fetchone()[0]
+
+    return {
+        "user": serialize_user(connection, user),
+        "activeActivity": serialize_activity(connection, active_row, user["id"]) if active_row else None,
+        "nearbyActivities": nearby,
+        "stats": {
+            "activeHosted": active_hosted,
+            "joinedPlans": joined,
+            "pendingRequests": pending_requests,
+        },
+    }
+
+
+def build_matches(connection: sqlite3.Connection, user: sqlite3.Row) -> dict[str, Any]:
     request_rows = connection.execute(
         """
         SELECT
-          jr.id,
-          jr.message,
-          jr.status,
-          jr.source,
-          u.id AS user_id,
-          u.name,
-          u.gender,
-          u.category,
-          u.distance_km,
-          u.vibe,
-          u.reputation,
-          u.phone_verified,
-          u.id_verified,
-          u.availability,
-          u.bio,
-          u.city
-        FROM join_requests jr
-        JOIN users u ON u.id = jr.user_id
-        WHERE jr.activity_id = ? AND jr.status = 'pending'
-        ORDER BY u.id_verified DESC, u.reputation DESC, u.distance_km ASC, jr.id DESC
+          am.id,
+          am.status,
+          am.created_at,
+          a.id AS activity_id,
+          a.title,
+          a.category,
+          a.location,
+          a.city,
+          a.start_time,
+          a.slots,
+          a.notes,
+          a.radius_km,
+          requester.id AS requester_id,
+          requester.name AS requester_name,
+          requester.city AS requester_city,
+          requester.bio AS requester_bio
+        FROM activity_members am
+        JOIN activities a ON a.id = am.activity_id
+        JOIN users requester ON requester.id = am.user_id
+        WHERE a.owner_id = ? AND am.status = 'requested'
+        ORDER BY am.created_at DESC, am.id DESC
         """,
-        (activity["id"],),
+        (user["id"],),
     ).fetchall()
 
-    notifications = connection.execute(
-        "SELECT * FROM notifications ORDER BY created_at DESC, id DESC LIMIT 5"
-    ).fetchall()
-    history_rows = connection.execute(
+    my_rows = connection.execute(
         """
-        SELECT *
-        FROM activities
-        ORDER BY created_at DESC, id DESC
-        LIMIT 5
-        """
+        SELECT a.*, u.name AS owner_name, u.city AS owner_city
+        FROM activities a
+        JOIN users u ON u.id = a.owner_id
+        WHERE a.owner_id = ?
+           OR EXISTS (
+             SELECT 1 FROM activity_members am
+             WHERE am.activity_id = a.id AND am.user_id = ? AND am.status IN ('requested', 'approved')
+           )
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT 10
+        """,
+        (user["id"], user["id"]),
     ).fetchall()
-
-    match_count = len(users)
-    request_count = len(request_rows)
-    trust_score = round(min(4.6 + (activity["approved_count"] * 0.1), 4.95), 1)
 
     return {
-        "categories": CATEGORIES,
-        "currentActivity": serialize_activity(activity),
-        "metrics": {
-            "matchCount": match_count,
-            "requestCount": request_count,
-            "trustScore": trust_score,
-        },
-        "nearbyUsers": [
+        "incomingRequests": [
             {
                 "id": row["id"],
-                "name": row["name"],
-                "gender": row["gender"],
-                "category": row["category"],
-                "distanceKm": row["distance_km"],
-                "vibe": row["vibe"],
-                "reputation": row["reputation"],
-                "phoneVerified": bool(row["phone_verified"]),
-                "idVerified": bool(row["id_verified"]),
-                "availability": row["availability"],
-                "bio": row["bio"],
-                "city": row["city"],
-            }
-            for row in users
-        ],
-        "requestQueue": [
-            {
-                "id": row["id"],
-                "message": row["message"],
-                "source": row["source"],
-                "person": {
-                    "id": row["user_id"],
-                    "name": row["name"],
-                    "gender": row["gender"],
+                "status": row["status"],
+                "createdAt": row["created_at"],
+                "activity": {
+                    "id": row["activity_id"],
+                    "title": row["title"],
                     "category": row["category"],
-                    "distanceKm": row["distance_km"],
-                    "vibe": row["vibe"],
-                    "reputation": row["reputation"],
-                    "phoneVerified": bool(row["phone_verified"]),
-                    "idVerified": bool(row["id_verified"]),
-                    "availability": row["availability"],
-                    "bio": row["bio"],
+                    "location": row["location"],
                     "city": row["city"],
+                    "time": row["start_time"],
+                    "slots": row["slots"],
+                    "notes": row["notes"],
+                    "radiusKm": row["radius_km"],
+                },
+                "requester": {
+                    "id": row["requester_id"],
+                    "name": row["requester_name"],
+                    "city": row["requester_city"],
+                    "bio": row["requester_bio"],
+                    "trustScore": calculate_trust_score(connection, row["requester_id"]),
                 },
             }
             for row in request_rows
         ],
-        "notifications": [
-            {
-                "id": row["id"],
-                "title": row["title"],
-                "body": row["body"],
-                "timestamp": row["created_at"],
-            }
-            for row in notifications
-        ],
-        "history": [
-            {
-                "id": row["id"],
-                "title": row["title"],
-                "category": row["category"],
-                "time": row["start_time"],
-                "location": row["location"],
-                "skillLevel": row["skill_level"],
-                "slots": row["slots"],
-                "radiusKm": row["radius_km"],
-                "notes": row["notes"],
-                "verifiedOnly": bool(row["verified_only"]),
-                "womenOnly": bool(row["women_only"]),
-                "approvedCount": row["approved_count"],
-                "status": row["status"],
-                "createdAt": row["created_at"],
-            }
-            for row in history_rows
-        ],
-        "profile": serialize_profile(profile),
-        "suggestions": build_suggestions(profile, history_rows),
-        "filters": {
-            "category": active_category,
-            "radiusKm": active_radius,
-            "verifiedOnly": active_verified_only,
-            "womenOnly": active_women_only,
+        "myActivities": [serialize_activity(connection, row, user["id"]) for row in my_rows],
+    }
+
+
+def build_user_profile(connection: sqlite3.Connection, user: sqlite3.Row) -> dict[str, Any]:
+    hosted_rows = connection.execute(
+        """
+        SELECT a.*, u.name AS owner_name, u.city AS owner_city
+        FROM activities a
+        JOIN users u ON u.id = a.owner_id
+        WHERE a.owner_id = ?
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT 8
+        """,
+        (user["id"],),
+    ).fetchall()
+
+    joined_rows = connection.execute(
+        """
+        SELECT a.*, owner.name AS owner_name, owner.city AS owner_city
+        FROM activities a
+        JOIN users owner ON owner.id = a.owner_id
+        JOIN activity_members am ON am.activity_id = a.id
+        WHERE am.user_id = ? AND am.status = 'approved'
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT 8
+        """,
+        (user["id"],),
+    ).fetchall()
+
+    past_rows = [row for row in hosted_rows if row["status"] != "active"]
+
+    return {
+        "user": serialize_user(connection, user),
+        "hostedActivities": [serialize_activity(connection, row, user["id"]) for row in hosted_rows if row["status"] == "active"],
+        "joinedActivities": [serialize_activity(connection, row, user["id"]) for row in joined_rows],
+        "pastActivities": [serialize_activity(connection, row, user["id"]) for row in past_rows],
+        "stats": {
+            "hostedCount": len(hosted_rows),
+            "joinedCount": len(joined_rows),
+            "requestCount": connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM activity_members am
+                JOIN activities a ON a.id = am.activity_id
+                WHERE a.owner_id = ? AND am.status = 'requested'
+                """,
+                (user["id"],),
+            ).fetchone()[0],
         },
     }
 
 
-def create_activity(connection: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
-    connection.execute("UPDATE activities SET status = 'closed' WHERE status = 'active'")
-    profile = get_profile(connection)
-    favorite_categories = json.loads(profile["favorite_categories"])
+def signup_user(connection: sqlite3.Connection, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    name = str(payload.get("name", "")).strip()
+    email = str(payload.get("email", "")).strip().lower()
+    password = str(payload.get("password", "")).strip()
+    city = str(payload.get("city", "")).strip()
+    bio = str(payload.get("bio", "")).strip()
 
-    activity = {
-        "title": str(payload.get("title", "Untitled activity")).strip()[:70] or "Untitled activity",
-        "category": str(payload.get("category", favorite_categories[0] if favorite_categories else "Trek")),
-        "start_time": str(payload.get("time", "06:00")),
-        "location": str(payload.get("location", profile["home_city"])).strip()[:40] or profile["home_city"],
-        "skill_level": str(payload.get("skillLevel", "Beginner friendly")).strip()[:40],
-        "slots": max(2, min(int(payload.get("slots", 5)), 10)),
-        "radius_km": max(5, min(int(payload.get("radius", profile["default_radius_km"])), 25)),
-        "notes": str(payload.get("notes", "")).strip()[:120],
-        "verified_only": int(to_bool(payload.get("verifiedOnly", bool(profile["default_verified_only"])))),
-        "women_only": int(to_bool(payload.get("womenOnly", False))),
-        "approved_count": 0,
-        "status": "active",
-        "created_at": now_iso(),
-    }
+    if not name or not email or not password or not city:
+        return HTTPStatus.BAD_REQUEST, {"error": "Name, email, password, and city are required."}
+    if len(password) < 6:
+        return HTTPStatus.BAD_REQUEST, {"error": "Password must be at least 6 characters."}
 
+    existing = connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+    if existing is not None:
+        return HTTPStatus.CONFLICT, {"error": "An account with that email already exists."}
+
+    user_id = connection.execute(
+        """
+        INSERT INTO users (name, email, password_hash, city, bio, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (name, email, hash_password(password), city, bio[:160], now_iso()),
+    ).lastrowid
+    token = create_session(connection, user_id)
+    user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return HTTPStatus.CREATED, {"token": token, "user": serialize_user(connection, user)}
+
+
+def login_user(connection: sqlite3.Connection, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    email = str(payload.get("email", "")).strip().lower()
+    password = str(payload.get("password", "")).strip()
+    row = connection.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    if row is None or not verify_password(password, row["password_hash"]):
+        return HTTPStatus.UNAUTHORIZED, {"error": "Invalid email or password."}
+
+    token = create_session(connection, row["id"])
+    return HTTPStatus.OK, {"token": token, "user": serialize_user(connection, row)}
+
+
+def create_activity(connection: sqlite3.Connection, user: sqlite3.Row, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    title = str(payload.get("title", "")).strip()
+    category = str(payload.get("category", "")).strip()
+    location = str(payload.get("location", "")).strip()
+    city = str(payload.get("city", user["city"])) .strip() or user["city"]
+    start_time = str(payload.get("time", "")).strip()
+    notes = str(payload.get("notes", "")).strip()
+    slots = to_int(payload.get("slots"), 4)
+    radius_km = to_int(payload.get("radiusKm"), 10)
+
+    if not title or not category or not location or not start_time:
+        return HTTPStatus.BAD_REQUEST, {"error": "Title, category, location, and time are required."}
+    if category not in CATEGORIES:
+        return HTTPStatus.BAD_REQUEST, {"error": "Unsupported category."}
+    if slots < 2 or slots > 20:
+        return HTTPStatus.BAD_REQUEST, {"error": "Slots must be between 2 and 20."}
+
+    connection.execute(
+        "UPDATE activities SET status = 'completed' WHERE owner_id = ? AND status = 'active'",
+        (user["id"],),
+    )
     activity_id = connection.execute(
         """
         INSERT INTO activities (
-          title, category, start_time, location, skill_level, slots, radius_km,
-          notes, verified_only, women_only, approved_count, status, created_at
+          owner_id, title, category, location, city, start_time, slots, notes, radius_km, status, created_at
         )
-        VALUES (
-          :title, :category, :start_time, :location, :skill_level, :slots, :radius_km,
-          :notes, :verified_only, :women_only, :approved_count, :status, :created_at
-        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
         """,
-        activity,
+        (user["id"], title[:80], category, location[:80], city[:40], start_time[:20], slots, notes[:160], radius_km, now_iso()),
     ).lastrowid
-
-    matches = fetch_matching_users(
-        connection,
-        category=activity["category"],
-        radius_km=activity["radius_km"],
-        verified_only=bool(activity["verified_only"]),
-        women_only=bool(activity["women_only"]),
-        city=activity["location"],
-    )[:3]
-
-    seeded_requests = []
-    for index, user in enumerate(matches):
-        message = (
-            f"I'm close by and can make it by {activity['start_time']}."
-            if index == 0
-            else f"Interested in joining. {user['vibe'].lower()} and available {user['availability'].lower()}."
-        )
-        seeded_requests.append(
-            (activity_id, user["id"], message, "pending", "matched", now_iso())
-        )
-
-    if seeded_requests:
-        connection.executemany(
-            """
-            INSERT INTO join_requests (activity_id, user_id, message, status, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            seeded_requests,
-        )
-
-    push_notification(
-        connection,
-        "Intent posted",
-        f"{activity['title']} is live for {activity['category'].lower()} matches within {activity['radius_km']} km.",
-    )
-
-    if matches:
-        push_notification(
-            connection,
-            "Live cluster found",
-            f"{len(matches)} nearby people fit this activity's current filters.",
-        )
-    else:
-        push_notification(
-            connection,
-            "No instant matches yet",
-            "Try widening the radius or relaxing filters to pull in more people.",
-        )
-
-    return build_dashboard(
-        connection,
-        category=activity["category"],
-        radius_km=activity["radius_km"],
-        verified_only=bool(activity["verified_only"]),
-        women_only=bool(activity["women_only"]),
-    )
-
-
-def decide_request(
-    connection: sqlite3.Connection,
-    request_id: int,
-    action: str,
-) -> tuple[int, dict[str, Any]]:
     row = connection.execute(
         """
-        SELECT jr.id, jr.activity_id, jr.user_id, jr.status, u.name
-        FROM join_requests jr
-        JOIN users u ON u.id = jr.user_id
-        WHERE jr.id = ?
+        SELECT a.*, u.name AS owner_name, u.city AS owner_city
+        FROM activities a
+        JOIN users u ON u.id = a.owner_id
+        WHERE a.id = ?
+        """,
+        (activity_id,),
+    ).fetchone()
+    return HTTPStatus.CREATED, {"activity": serialize_activity(connection, row, user["id"])}
+
+
+def join_activity(connection: sqlite3.Connection, user: sqlite3.Row, activity_id: int) -> tuple[int, dict[str, Any]]:
+    row = connection.execute(
+        "SELECT * FROM activities WHERE id = ? AND status = 'active'",
+        (activity_id,),
+    ).fetchone()
+    if row is None:
+        return HTTPStatus.NOT_FOUND, {"error": "Activity not found."}
+    if row["owner_id"] == user["id"]:
+        return HTTPStatus.CONFLICT, {"error": "You already own this activity."}
+
+    existing = connection.execute(
+        "SELECT status FROM activity_members WHERE activity_id = ? AND user_id = ?",
+        (activity_id, user["id"]),
+    ).fetchone()
+    if existing is not None and existing["status"] in {"requested", "approved"}:
+        return HTTPStatus.CONFLICT, {"error": "You have already joined or requested this activity."}
+
+    if activity_approved_count(connection, activity_id) >= row["slots"]:
+        return HTTPStatus.CONFLICT, {"error": "This activity is already full."}
+
+    if existing is None:
+        connection.execute(
+            "INSERT INTO activity_members (activity_id, user_id, status, created_at) VALUES (?, ?, 'requested', ?)",
+            (activity_id, user["id"], now_iso()),
+        )
+    else:
+        connection.execute(
+            "UPDATE activity_members SET status = 'requested', created_at = ? WHERE activity_id = ? AND user_id = ?",
+            (now_iso(), activity_id, user["id"]),
+        )
+    return HTTPStatus.OK, {"message": "Join request sent."}
+
+
+def decide_request(connection: sqlite3.Connection, user: sqlite3.Row, request_id: int, action: str) -> tuple[int, dict[str, Any]]:
+    row = connection.execute(
+        """
+        SELECT am.id, am.activity_id, am.user_id, am.status, a.owner_id, a.slots
+        FROM activity_members am
+        JOIN activities a ON a.id = am.activity_id
+        WHERE am.id = ?
         """,
         (request_id,),
     ).fetchone()
-
     if row is None:
-        return HTTPStatus.NOT_FOUND, {"error": "Join request not found."}
-
-    activity = connection.execute(
-        "SELECT * FROM activities WHERE id = ?", (row["activity_id"],)
-    ).fetchone()
-    if activity is None:
-        return HTTPStatus.NOT_FOUND, {"error": "Activity not found."}
+        return HTTPStatus.NOT_FOUND, {"error": "Request not found."}
+    if row["owner_id"] != user["id"]:
+        return HTTPStatus.FORBIDDEN, {"error": "You cannot manage this request."}
+    if row["status"] != "requested":
+        return HTTPStatus.CONFLICT, {"error": "This request has already been handled."}
 
     if action == "approve":
-        if activity["approved_count"] >= activity["slots"]:
+        approved_count = activity_approved_count(connection, row["activity_id"])
+        if approved_count >= row["slots"]:
             return HTTPStatus.CONFLICT, {"error": "This activity is already full."}
+        connection.execute("UPDATE activity_members SET status = 'approved' WHERE id = ?", (request_id,))
+        return HTTPStatus.OK, {"message": "Request approved."}
 
-        connection.execute(
-            "UPDATE join_requests SET status = 'approved' WHERE id = ?",
-            (request_id,),
-        )
-        connection.execute(
-            "UPDATE activities SET approved_count = approved_count + 1 WHERE id = ?",
-            (activity["id"],),
-        )
-        push_notification(
-            connection,
-            "Request approved",
-            f"{row['name']} joined your activity group.",
-        )
-    elif action == "decline":
-        connection.execute(
-            "UPDATE join_requests SET status = 'declined' WHERE id = ?",
-            (request_id,),
-        )
-        push_notification(
-            connection,
-            "Request updated",
-            f"{row['name']} was not added to this activity.",
-        )
-    else:
-        return HTTPStatus.BAD_REQUEST, {"error": "Unsupported action."}
+    if action == "decline":
+        connection.execute("UPDATE activity_members SET status = 'declined' WHERE id = ?", (request_id,))
+        return HTTPStatus.OK, {"message": "Request declined."}
 
-    return HTTPStatus.OK, build_dashboard(connection)
-
-
-def create_invitation(
-    connection: sqlite3.Connection,
-    *,
-    user_id: int,
-    activity_id: int | None,
-) -> tuple[int, dict[str, Any]]:
-    activity = (
-        connection.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone()
-        if activity_id
-        else get_current_activity(connection)
-    )
-    if activity is None:
-        return HTTPStatus.NOT_FOUND, {"error": "No active activity to invite into."}
-
-    user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    if user is None:
-        return HTTPStatus.NOT_FOUND, {"error": "User not found."}
-
-    existing = connection.execute(
-        """
-        SELECT id
-        FROM join_requests
-        WHERE activity_id = ? AND user_id = ? AND status IN ('pending', 'approved')
-        """,
-        (activity["id"], user_id),
-    ).fetchone()
-    if existing is not None:
-        return HTTPStatus.CONFLICT, {"error": "That user is already invited to this activity."}
-
-    connection.execute(
-        """
-        INSERT INTO join_requests (activity_id, user_id, message, status, source, created_at)
-        VALUES (?, ?, ?, 'pending', 'invite', ?)
-        """,
-        (
-            activity["id"],
-            user_id,
-            "This person was invited by the activity creator and is waiting for approval.",
-            now_iso(),
-        ),
-    )
-    push_notification(
-        connection,
-        "Invite sent",
-        f"{user['name']} received your activity invite.",
-    )
-    return HTTPStatus.OK, build_dashboard(connection)
-
-
-def update_profile(connection: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
-    current = get_profile(connection)
-    favorite_categories = payload.get("favoriteCategories")
-    if isinstance(favorite_categories, list):
-        filtered = [str(item) for item in favorite_categories if str(item) in {c["name"] for c in CATEGORIES}]
-        if not filtered:
-            filtered = json.loads(current["favorite_categories"])
-    else:
-        filtered = json.loads(current["favorite_categories"])
-
-    connection.execute(
-        """
-        UPDATE profile
-        SET organizer_name = ?,
-            home_city = ?,
-            default_radius_km = ?,
-            default_verified_only = ?,
-            favorite_categories = ?,
-            safety_note = ?
-        WHERE id = 1
-        """,
-        (
-            str(payload.get("organizerName", current["organizer_name"])).strip()[:60] or current["organizer_name"],
-            str(payload.get("homeCity", current["home_city"])).strip()[:40] or current["home_city"],
-            max(5, min(int(payload.get("defaultRadiusKm", current["default_radius_km"])), 25)),
-            int(to_bool(payload.get("defaultVerifiedOnly", bool(current["default_verified_only"])))),
-            json.dumps(filtered),
-            str(payload.get("safetyNote", current["safety_note"])).strip()[:160] or current["safety_note"],
-        ),
-    )
-    push_notification(
-        connection,
-        "Profile updated",
-        "Your organizer defaults were saved for the next activity.",
-    )
-    return build_dashboard(connection)
+    return HTTPStatus.BAD_REQUEST, {"error": "Unsupported action."}
 
 
 class SyncansHandler(BaseHTTPRequestHandler):
-    server_version = "SYNCANS/1.0"
+    server_version = "SYNCANS/2.0"
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -885,7 +655,7 @@ class SyncansHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if not parsed.path.startswith("/api/"):
-            json_response(self, HTTPStatus.NOT_FOUND, {"error": "Unknown endpoint."})
+            error_response(self, HTTPStatus.NOT_FOUND, "Unknown endpoint.")
             return
         self.handle_api_post(parsed)
 
@@ -897,31 +667,55 @@ class SyncansHandler(BaseHTTPRequestHandler):
             json_response(self, HTTPStatus.OK, {"status": "ok"})
             return
 
-        if parsed.path == "/api/dashboard":
-            query = parse_qs(parsed.query)
-            category = query.get("category", [None])[0]
-            radius = query.get("radius", [None])[0]
-            verified_only = query.get("verifiedOnly", [None])[0]
-            women_only = query.get("womenOnly", [None])[0]
+        with get_connection() as connection:
+            if parsed.path == "/api/categories":
+                json_response(self, HTTPStatus.OK, {"categories": CATEGORIES})
+                return
 
-            with get_connection() as connection:
-                payload = build_dashboard(
+            user = require_user(connection, self)
+            if user is None:
+                return
+
+            if parsed.path == "/api/home":
+                json_response(self, HTTPStatus.OK, build_home(connection, user))
+                return
+
+            if parsed.path == "/api/activities":
+                query = parse_qs(parsed.query)
+                category = query.get("category", [None])[0]
+                radius = query.get("radius", [None])[0]
+                city = query.get("city", [user["city"]])[0]
+                activities = query_activities(
                     connection,
+                    user_id=user["id"],
                     category=category,
-                    radius_km=int(radius) if radius else None,
-                    verified_only=to_bool(verified_only) if verified_only is not None else None,
-                    women_only=to_bool(women_only) if women_only is not None else None,
+                    radius_km=to_int(radius, 0) or None,
+                    city=city,
+                    include_mine=True,
                 )
-            json_response(self, HTTPStatus.OK, payload)
-            return
+                json_response(
+                    self,
+                    HTTPStatus.OK,
+                    {
+                        "activities": activities,
+                        "filters": {
+                            "category": category,
+                            "radiusKm": to_int(radius, 0) or None,
+                            "city": city,
+                        },
+                    },
+                )
+                return
 
-        if parsed.path == "/api/profile":
-            with get_connection() as connection:
-                payload = {"profile": serialize_profile(get_profile(connection))}
-            json_response(self, HTTPStatus.OK, payload)
-            return
+            if parsed.path == "/api/matches":
+                json_response(self, HTTPStatus.OK, build_matches(connection, user))
+                return
 
-        json_response(self, HTTPStatus.NOT_FOUND, {"error": "Unknown endpoint."})
+            if parsed.path == "/api/user":
+                json_response(self, HTTPStatus.OK, build_user_profile(connection, user))
+                return
+
+        error_response(self, HTTPStatus.NOT_FOUND, "Unknown endpoint.")
 
     def handle_api_post(self, parsed) -> None:
         length = int(self.headers.get("Content-Length", "0"))
@@ -929,40 +723,48 @@ class SyncansHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw_body.decode("utf-8") or "{}")
         except json.JSONDecodeError:
-            json_response(self, HTTPStatus.BAD_REQUEST, {"error": "Invalid JSON body."})
+            error_response(self, HTTPStatus.BAD_REQUEST, "Invalid JSON body.")
             return
 
         with get_connection() as connection:
-            if parsed.path == "/api/activities":
-                response = create_activity(connection, payload)
-                json_response(self, HTTPStatus.CREATED, response)
-                return
-
-            if parsed.path == "/api/invitations":
-                status, response = create_invitation(
-                    connection,
-                    user_id=int(payload.get("userId", 0)),
-                    activity_id=payload.get("activityId"),
-                )
+            if parsed.path == "/api/auth/signup":
+                status, response = signup_user(connection, payload)
                 json_response(self, status, response)
                 return
 
-            if parsed.path == "/api/profile":
-                response = update_profile(connection, payload)
-                json_response(self, HTTPStatus.OK, response)
+            if parsed.path == "/api/auth/login":
+                status, response = login_user(connection, payload)
+                json_response(self, status, response)
+                return
+
+            user = require_user(connection, self)
+            if user is None:
+                return
+
+            if parsed.path == "/api/auth/logout":
+                token = get_token_from_headers(self)
+                connection.execute("DELETE FROM sessions WHERE token = ?", (token,))
+                json_response(self, HTTPStatus.OK, {"message": "Logged out."})
+                return
+
+            if parsed.path == "/api/activities":
+                status, response = create_activity(connection, user, payload)
+                json_response(self, status, response)
+                return
+
+            if parsed.path.startswith("/api/activities/") and parsed.path.endswith("/join"):
+                activity_id = to_int(parsed.path.split("/")[3], 0)
+                status, response = join_activity(connection, user, activity_id)
+                json_response(self, status, response)
                 return
 
             if parsed.path.startswith("/api/requests/") and parsed.path.endswith("/decision"):
-                request_id = parsed.path.split("/")[3]
-                status, response = decide_request(
-                    connection,
-                    request_id=int(request_id),
-                    action=str(payload.get("action", "")),
-                )
+                request_id = to_int(parsed.path.split("/")[3], 0)
+                status, response = decide_request(connection, user, request_id, str(payload.get("action", "")))
                 json_response(self, status, response)
                 return
 
-        json_response(self, HTTPStatus.NOT_FOUND, {"error": "Unknown endpoint."})
+        error_response(self, HTTPStatus.NOT_FOUND, "Unknown endpoint.")
 
     def serve_static(self, requested_path: str) -> None:
         relative = "index.html" if requested_path in {"", "/"} else requested_path.lstrip("/")
@@ -991,8 +793,7 @@ def run() -> None:
     init_db()
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", "8000"))
-    address = (host, port)
-    server = ThreadingHTTPServer(address, SyncansHandler)
+    server = ThreadingHTTPServer((host, port), SyncansHandler)
     print(f"SYNCANS server running at http://{host}:{port}")
     server.serve_forever()
 
